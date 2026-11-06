@@ -209,6 +209,9 @@ def build_parser():
     p.add_argument("--feat-dir", required=True)
     p.add_argument("--label-dir", required=True)
     p.add_argument("--split-dir", required=True)
+    p.add_argument("--feature-layout", default="auto", choices=["auto", "td", "dt"],
+                   help="axis order on disk: td=(T,D), dt=(D,T); auto infers it "
+                        "from which axis stays constant across videos")
     p.add_argument("--crop-axis", default="auto", choices=["auto", "0", "1"],
                    help="which axis of a 3-D feature file is the crop axis")
 
@@ -268,13 +271,26 @@ def main():
     device = pick_device(args.device)
     print(f"device: {device}")
 
-    file_to_label, splits, feat_dir = da.discover_dataset(
-        args.feat_dir, args.label_dir, args.split_dir
-    )
+    ds = da.discover_dataset(args.feat_dir, args.label_dir, args.split_dir)
+    file_to_label, splits = ds["file_to_label"], ds["splits"]
+    feat_dir = ds["feat_dir"]
     n_anomaly = sum(file_to_label.values())
     print(f"{len(file_to_label)} feature files: "
           f"{n_anomaly} anomaly / {len(file_to_label) - n_anomaly} normal, "
           f"{len(splits)} splits")
+    if ds["unmatched"]:
+        total = sum(len(v) for v in ds["unmatched"].values())
+        print(f"[warn] {total} split entries matched no feature file; "
+              f"run check_data.py to see which")
+    empty = [n for n, f in zip(ds["split_names"], splits) if not f]
+    if empty:
+        raise SystemExit(f"these splits matched no feature file: {empty}. "
+                         f"Run check_data.py first.")
+
+    layout, evidence = (args.feature_layout, "forced from the command line")
+    if args.feature_layout == "auto":
+        layout, evidence = da.infer_layout(feat_dir, ds["feature_stems"])
+    print(f"feature layout: {layout} ({evidence})")
 
     k = len(splits) if args.folds < 0 else min(args.folds, len(splits))
     fold_scores = {"accuracy": [], "ROC_AUC": [], "PR_AUC": [], "F1": []}
@@ -300,9 +316,9 @@ def main():
                      else rng.sample(cal_all, min(args.max_cal_videos, len(cal_all))))
         print(f"  train {len(train_files)} / cal {len(cal_files)} / test {len(test_files)} videos")
 
-        train_feats, train_files = da.load_fold(train_files, feat_dir, args.crop_axis)
-        cal_feats, cal_files = da.load_fold(cal_files, feat_dir, args.crop_axis)
-        test_feats, test_files = da.load_fold(test_files, feat_dir, args.crop_axis)
+        train_feats, train_files = da.load_fold(train_files, feat_dir, layout, args.crop_axis)
+        cal_feats, cal_files = da.load_fold(cal_files, feat_dir, layout, args.crop_axis)
+        test_feats, test_files = da.load_fold(test_files, feat_dir, layout, args.crop_axis)
         feature_size = da.feature_dim(train_feats)
         print(f"  feature dim {feature_size}, crops {train_feats[0].shape[1]}")
 
