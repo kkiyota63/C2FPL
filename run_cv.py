@@ -31,6 +31,7 @@ import torch.nn.init as torch_init
 from sklearn.metrics import (
     accuracy_score,
     auc,
+    balanced_accuracy_score,
     f1_score,
     precision_recall_curve,
     roc_auc_score,
@@ -157,23 +158,60 @@ def video_scores(model, feats, args, device):
     return np.array(out, dtype=np.float64)
 
 
-def calibrate_threshold(scores, labels):
-    """Threshold maximising F1 on the calibration fold."""
-    if len(np.unique(labels)) < 2:
+def calibrate_threshold(scores, labels, metric="contamination", contamination=None):
+    """Pick a decision threshold on the calibration fold.
+
+    "contamination" takes the quantile of the cal score distribution at the
+    assumed anomaly rate, i.e. threshold = percentile(scores, 100*(1-c)).  This
+    is the criterion the surrounding project already uses.  It needs no cal
+    labels at all; with --contamination unset, c falls back to the anomaly rate
+    observed on the cal fold.
+
+    "f1" maximises F1.  At a low anomaly rate that criterion collapses:
+    flagging EVERY video scores F1 = 2r / (1 + r), and a weak score rarely
+    beats it, so the threshold lands below every score and the detector answers
+    "anomaly" for everything -- which is what the first run did (F1 0.1344
+    against the 0.1333 of flagging everything).
+
+    "balanced" maximises balanced accuracy, (TPR + TNR) / 2.  Same ranking as
+    Youden's J, and it cannot be won by answering all-one or all-zero, both of
+    which sit at exactly 0.5.
+    """
+    if metric != "contamination" and len(np.unique(labels)) < 2:
         print("  [warn] calibration fold is single-class; falling back to 0.5")
         return 0.5
+
+    if metric == "contamination":
+        rate = float(np.mean(labels)) if contamination is None or contamination < 0 \
+            else float(contamination)
+        threshold = float(np.quantile(scores, 1.0 - rate))
+        flagged = float(np.mean(scores >= threshold))
+        print(f"  [cal] threshold {threshold:.4f} "
+              f"(quantile at contamination {rate:.4f}, flags {flagged:.1%} of "
+              f"cal videos)")
+        return threshold
+
     candidates = np.unique(np.concatenate([scores, [0.0, 1.0]]))
-    best_threshold, best_f1 = 0.5, -1.0
-    for threshold in candidates:
-        f1 = f1_score(labels, (scores >= threshold).astype(int), zero_division=0)
-        if f1 > best_f1:
-            best_threshold, best_f1 = float(threshold), f1
-    print(f"  [cal] threshold {best_threshold:.4f} (F1 {best_f1:.4f} on cal fold)")
-    return best_threshold
+    if metric == "f1":
+        def score_of(pred):
+            return f1_score(labels, pred, zero_division=0)
+    else:
+        def score_of(pred):
+            return balanced_accuracy_score(labels, pred)
+
+    values = np.array([score_of((scores >= t).astype(int)) for t in candidates])
+    best = int(values.argmax())
+    threshold = float(candidates[best])
+    flagged = float(np.mean(scores >= threshold))
+    print(f"  [cal] threshold {threshold:.4f} ({metric} {values[best]:.4f} on cal "
+          f"fold, flags {flagged:.1%} of videos)")
+    return threshold
 
 
 def evaluate(scores, labels, threshold):
     pred = (scores >= threshold).astype(int)
+    print(f"  [test] flags {pred.mean():.1%} of videos as anomalous "
+          f"(true rate {labels.mean():.1%})")
     result = {
         "accuracy": float(accuracy_score(labels, pred)),
         "F1": float(f1_score(labels, pred, zero_division=0)),
@@ -243,6 +281,14 @@ def build_parser():
     p.add_argument("--dropout", type=float, default=0.6)
     p.add_argument("--milestones", type=int, nargs="*", default=[15, 25])
     p.add_argument("--workers", type=int, default=0)
+    p.add_argument("--threshold-metric", default="contamination",
+                   choices=["contamination", "balanced", "f1"],
+                   help="how the cal fold threshold is chosen; 'contamination' is "
+                        "the quantile rule this project already uses, 'f1' "
+                        "collapses to 'flag everything' at a low anomaly rate")
+    p.add_argument("--contamination", type=float, default=-1.0,
+                   help="assumed anomaly rate for --threshold-metric contamination; "
+                        "-1 uses the rate observed on the cal fold")
     p.add_argument("--video-agg", default="max", choices=["max", "mean", "topk"])
     p.add_argument("--topk-ratio", type=float, default=0.1)
 
@@ -333,7 +379,9 @@ def main():
 
         y_cal = np.array([file_to_label[f] for f in cal_files])
         y_test = np.array([file_to_label[f] for f in test_files])
-        threshold = calibrate_threshold(video_scores(model, cal_feats, args, device), y_cal)
+        threshold = calibrate_threshold(video_scores(model, cal_feats, args, device),
+                                        y_cal, metric=args.threshold_metric,
+                                        contamination=args.contamination)
         scores = video_scores(model, test_feats, args, device)
         result = evaluate(scores, y_test, threshold)
 
