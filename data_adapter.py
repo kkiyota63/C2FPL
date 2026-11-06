@@ -35,6 +35,14 @@ import numpy as np
 # feature widths that are almost certainly a channel count, not a time axis
 COMMON_FEATURE_DIMS = {256, 512, 768, 1024, 1280, 2048, 4096}
 
+# extensions stripped when matching a split entry to a feature file: the split
+# files list source videos (".mp4"), while the features are ".npy"
+KNOWN_EXTENSIONS = (
+    ".npy", ".npz", ".pt", ".pkl",
+    ".mp4", ".avi", ".mkv", ".mov", ".webm", ".m4v", ".mpg", ".mpeg",
+    ".ts", ".wmv", ".flv",
+)
+
 
 # --------------------------------------------------------------------------- #
 # small helpers
@@ -51,13 +59,23 @@ def read_txt(path):
 
 
 def normalize_name(entry):
-    """'dir/x.npy' -> 'x', 'x.npy' -> 'x', 'x' -> 'x'.
+    """Reduce a path or filename to the stem both sides can be matched on.
 
-    Only a trailing '.npy' is stripped, so a video called 'a.b' keeps its dot.
+    'dir/x.mp4' -> 'x', 'x.npy' -> 'x', 'x.mp4.npy' -> 'x', 'x' -> 'x'.
+
+    Only extensions in KNOWN_EXTENSIONS are stripped (repeatedly, so a doubled
+    extension is handled), which keeps a video genuinely called 'a.b' intact.
     """
     base = os.path.basename(str(entry).strip().replace("\\", "/"))
-    if base.endswith(".npy"):
-        base = base[:-4]
+    stripping = True
+    while stripping:
+        stripping = False
+        lowered = base.lower()
+        for ext in KNOWN_EXTENSIONS:
+            if lowered.endswith(ext) and len(base) > len(ext):
+                base = base[:-len(ext)]
+                stripping = True
+                break
     return base
 
 
@@ -141,6 +159,11 @@ def discover_dataset(feat_dir, label_dir, split_dir):
         kept, missed = [], []
         for entry in raw:
             stem = normalize_name(entry)
+            if stem not in stems and "." in stem:
+                # unknown extension: strip whatever follows the last dot
+                candidate = stem.rsplit(".", 1)[0]
+                if candidate in stems:
+                    stem = candidate
             (kept if stem in stems else missed).append(stem if stem in stems else entry)
         splits.append(kept)
         split_names.append(path.name)
