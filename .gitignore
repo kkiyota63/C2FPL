@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+.venv/
+.ipynb_checkpoints/
+*.egg-info/
+
+# experiment outputs
+fpr*.npy
+tpr*.npy
+precision*.npy
+recall*.npy
+pred_*.npy
+unsupervised_ckpt/
+results*.json
+wandb/
